@@ -299,6 +299,9 @@ def parse_args():
     parser.add_argument('--save_video', action='store_true',
                         help='output a video when segment the video')
     
+    parser.add_argument('--frames', metavar='N', type=int, nargs='*', 
+                        help='an integer number list of the selected frames')
+    
     parser.add_argument('--over_write', action='store_true',
                         help='whether to overwrite the pkl file for new bbox')
     
@@ -334,7 +337,7 @@ if __name__ == "__main__":
         out_fps  = sequence.cam['fps']
         valid_ts = [ts[:-4] for ts in sequence.file_basename]
         if args.smpl_box:
-            # load bboxes from the SMPL projection
+            print("load bboxes from the SMPL projection")
             boxes = load_boxes(sequence.smpl_mask, sequence.bbox, sequence.cam, ratio=0.1)
             kpts = [[]] * len(boxes)
         else:
@@ -344,18 +347,19 @@ if __name__ == "__main__":
         results = SegManualMaskPredictor().video_predict(
             source           = vid_path,
             model_type       = "vit_l", # vit_l, vit_h, vit_b
-            input_all_boxes  = boxes,
-            input_all_point  = kpts,
+            input_all_boxes  = boxes if args.frames is None else [boxes[f] for f in args.frames],
+            input_all_point  = kpts if args.frames is None else [kpts[f] for f in args.frames],
+            time_stamps      = valid_ts if args.frames is None else [valid_ts[f] for f in args.frames],
             multimask_output = True,
             random_color     = False,
             output_path      = f"{vid_path[:-4]}_mask.mp4",
             out_fps          = out_fps,
-            time_stamps      = valid_ts,
             save_video       = args.save_video,
             visibel_thresh   = args.thresh
         )
 
-        for imgname, mask in zip(sequence.file_basename, results):
+        filenames = sequence.file_basename if args.frames is None else [sequence.file_basename[f] for f in args.frames]
+        for imgname, mask in zip(filenames, results):
             if len(mask) > 200:
                 (x1, x2, y1, y2) = get_box(mask[:, [1,0]], 
                             sequence.cam['height'], 
@@ -364,7 +368,17 @@ if __name__ == "__main__":
                             ratio=0)
                 sequence.updata_pkl(imgname, bbox=[x1, y1, x2, y2])
 
-        sequence.save_pkl(overwrite=args.overwrite)
+        sequence.save_pkl(overwrite=args.over_write)
         
-        with open(pkl_file[:-4] + "_mask.pkl", 'wb') as f:
+        mask_file = pkl_file[:-4] + "_mask.pkl"
+
+        if os.path.exists(mask_file) and args.frames is not None:
+            with open(mask_file, 'rb') as f:
+                pre_results = pickle.load(f)['masks']
+            for ind, frame in enumerate(args.frames):
+                pre_results[frame] = results[ind]
+            results = pre_results
+
+        with open(mask_file, 'wb') as f:
             pickle.dump({'masks': results}, f)
+            print(f"mask saved to: {mask_file}")

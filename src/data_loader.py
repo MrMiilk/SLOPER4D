@@ -119,15 +119,15 @@ class SLOPER4D_Dataset(Dataset):
         self.framerate = data['framerate'] # scalar
         self.length    = data['total_frames'] if 'total_frames' in data else len(data['frame_num'])
 
-        self.world2lidar, self.lidar_tstamps = self.load_lidar_data(data)
+        self.world2lidar, self.lidar_tstamps = self.get_lidar_data()
         self.load_3d_data(data)    
         self.load_rgb_data(data)
         self.load_mask(pkl_file)
 
         self.check_length()
 
-    def load_lidar_data(self, data):
-        lidar_traj    = data['first_person']['lidar_traj'].copy()
+    def get_lidar_data(self, is_inv=True):
+        lidar_traj    = self.data['first_person']['lidar_traj'].copy()
         lidar_tstamps = lidar_traj[:self.length, -1]
         world2lidar   = np.array([np.eye(4)] * self.length)
         world2lidar[:, :3, :3] = R.from_quat(lidar_traj[:self.length, 4: 8]).inv().as_matrix()
@@ -145,7 +145,7 @@ class SLOPER4D_Dataset(Dataset):
             
         if 'RGB_frames' not in data:
             data['RGB_frames'] = {}
-            world2lidar, lidar_tstamps = self.load_lidar_data(data)
+            world2lidar, lidar_tstamps = self.get_lidar_data()
             data['RGB_frames']['file_basename'] = [''] * self.length
             data['RGB_frames']['lidar_tstamps'] = lidar_tstamps[:self.length]
             data['RGB_frames']['bbox']          = [[]] * self.length
@@ -160,8 +160,8 @@ class SLOPER4D_Dataset(Dataset):
         self.cam_pose      = data['RGB_frames']['cam_pose']      # extrinsic, world to camera (N, [4, 4])
 
         if self.return_smpl:
-            vertices, _ = self.return_smpl_verts(self.cam_pose)
-            self.smpl_mask = world_to_pixels(vertices.numpy(), self.cam_pose, self.cam)
+            self.smpl_verts, _ = self.return_smpl_verts()
+            self.smpl_mask = world_to_pixels(self.smpl_verts, self.cam_pose, self.cam)
 
     def load_mask(self, pkl_file):
         mask_pkl = pkl_file[:-4] + "_mask.pkl"
@@ -225,35 +225,37 @@ class SLOPER4D_Dataset(Dataset):
         print(f'Data length: {self.length}')
         
     def get_cam_params(self): 
-        return torch.Tensor(self.cam['lidar2cam']), \
-            torch.Tensor(self.cam['intrinsics']), torch.Tensor(self.cam['dist'])
+        return torch.from_numpy(np.array(self.cam['lidar2cam']).astype(np.float32)).to(self.device), \
+               torch.from_numpy(np.array(self.cam['intrinsics']).astype(np.float32)).to(self.device), \
+               torch.from_numpy(np.array(self.cam['dist']).astype(np.float32)).to(self.device)
             
     def get_img_shape(self):
         return self.cam['width'], self.cam['height']
 
-    def return_smpl_verts(self, extrinsics=None):
+    def return_smpl_verts(self, ):
         file_path = os.path.dirname(os.path.abspath(__file__))
         with torch.no_grad():
-            self.human_model = smplx.create(f"{os.path.dirname(file_path)}/smpl",
+            human_model = smplx.create(f"{os.path.dirname(file_path)}/smpl",
                                     gender=self.smpl_gender, 
                                     use_face_contour=False,
                                     ext="npz")
             orient = torch.tensor(self.smpl_pose).float()[:, :3]
             bpose  = torch.tensor(self.smpl_pose).float()[:, 3:]
             transl = torch.tensor(self.global_trans).float()
-            smpl_md = self.human_model(betas=torch.tensor(self.betas).reshape(-1, 10).float(), 
+            smpl_md = human_model(betas=torch.tensor(self.betas).reshape(-1, 10).float(), 
                                     return_verts=True, 
                                     body_pose=bpose,
                                     global_orient=orient,
                                     transl=transl)
             
-        return smpl_md.vertices, smpl_md.joints
+        return smpl_md.vertices.numpy(), smpl_md.joints.numpy()
             
     def __getitem__(self, index):
         sample = {
            
             'file_basename': self.file_basename[index],  # image file name            
             'lidar_tstamps': self.lidar_tstamps[index],  # lidar timestamp           
+            'lidar_pose'   : self.world2lidar[index],    # 4*4 transformation, world to lidar                    
            
             'bbox'    : self.bbox[index],     # 2D bbox (x1, y1, x2, y2)                      
             'mask'    : get_bool_from_coordinates(self.masks[index]),  # 2D mask (height, width)
@@ -266,6 +268,7 @@ class SLOPER4D_Dataset(Dataset):
 
             # 2D mask of SMPL on images, (n, [x, y]), where (x, y) is the pixel coordinate on the image
             'smpl_mask'    : self.smpl_mask[index] if hasattr(self, 'smpl_mask') else [],   
+            'smpl_verts'   : self.smpl_verts[index] if hasattr(self, 'smpl_verts') else [],   
 
             # in world coordinates, (n, (x, y, z)), the n is different in each frame
             # if fix_point_num is True, the every frame will be resampled to 1024 points
